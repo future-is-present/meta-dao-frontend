@@ -9,6 +9,7 @@ import { notifications } from '@mantine/notifications';
 import {
   MarketAccountWithKey,
   Markets,
+  OpenOrder,
   OpenOrdersAccountWithKey,
   OrderBook,
   Proposal,
@@ -26,14 +27,14 @@ export interface ProposalInterface {
   proposal?: Proposal;
   proposalNumber?: number;
   markets?: Markets;
-  orders?: OpenOrdersAccountWithKey[];
+  openOrdersAccounts?: OpenOrdersAccountWithKey[];
   orderBookObject?: OrderBook;
   loading: boolean;
   isCranking: boolean;
   metaDisabled: boolean;
   usdcDisabled: boolean;
   crankMarkets: (individualEvent?: PublicKey) => Promise<void>;
-  fetchOpenOrders: (owner: PublicKey) => Promise<void>;
+  fetchOpenOrdersAccounts: (owner: PublicKey) => Promise<void>;
   fetchMarketsInfo: () => Promise<void>;
   createTokenAccounts: (fromBase?: boolean) => Promise<void>;
   createTokenAccountsTransactions: (fromBase?: boolean) => Promise<Transaction[] | undefined>;
@@ -98,7 +99,7 @@ export function ProposalProvider({
   const [metaDisabled, setMetaDisabled] = useState(false);
   const [usdcDisabled, setUsdcDisabled] = useState(false);
   const [markets, setMarkets] = useState<Markets>();
-  const [orders, setOrders] = useState<OpenOrdersAccountWithKey[]>([]);
+  const [openOrdersAccounts, setOpenOrdersAccounts] = useState<OpenOrdersAccountWithKey[]>([]);
   const [isCranking, setIsCranking] = useState<boolean>(false);
   const { crankMarketTransactions } = useOpenbookTwap();
 
@@ -184,7 +185,7 @@ export function ProposalProvider({
     }, 1000),
     [markets, vaultProgram, openbook, openbookTwap, proposal, connection],
   );
-  const fetchOpenOrders = useCallback(
+  const fetchOpenOrdersAccounts = useCallback(
     debounce<[PublicKey]>(async (owner: PublicKey) => {
       if (!openbook || !proposal) {
         return;
@@ -197,7 +198,7 @@ export function ProposalProvider({
         { memcmp: { offset: 8, bytes: owner.toBase58() } },
         { memcmp: { offset: 40, bytes: proposal.account.openbookFailMarket.toBase58() } },
       ]);
-      setOrders(
+      setOpenOrdersAccounts(
         passOrders
           .concat(failOrders)
           .sort((a, b) => (a.account.accountNum < b.account.accountNum ? 1 : -1)),
@@ -208,9 +209,9 @@ export function ProposalProvider({
 
   useEffect(() => {
     if (proposal && wallet.publicKey) {
-      fetchOpenOrders(wallet.publicKey);
+      fetchOpenOrdersAccounts(wallet.publicKey);
     }
-  }, [markets, fetchOpenOrders]);
+  }, [markets, fetchOpenOrdersAccounts]);
 
   useEffect(() => {
     if (!markets && proposal) {
@@ -480,7 +481,7 @@ export function ProposalProvider({
 
         await sender.send(placeTxs);
         await fetchMarketsInfo();
-        await fetchOpenOrders(wallet.publicKey);
+        await fetchOpenOrdersAccounts(wallet.publicKey);
       } catch (err) {
         console.error(err);
       } finally {
@@ -495,7 +496,7 @@ export function ProposalProvider({
       sender,
       placeOrderTransactions,
       fetchMarketsInfo,
-      fetchOpenOrders,
+      fetchOpenOrdersAccounts,
     ],
   );
 
@@ -520,14 +521,14 @@ export function ProposalProvider({
         if (!passTxs || !failTxs) return;
         const txs = [...passTxs, ...failTxs].filter(Boolean);
         await sender.send(txs as VersionedTransaction[]);
-        fetchOpenOrders(wallet.publicKey);
+        fetchOpenOrdersAccounts(wallet.publicKey);
       } catch (err) {
         console.error(err);
       } finally {
         setIsCranking(false);
       }
     },
-    [markets, proposal, wallet.publicKey, sender, crankMarketTransactions, fetchOpenOrders],
+    [markets, proposal, wallet.publicKey, sender, crankMarketTransactions, fetchOpenOrdersAccounts],
   );
 
   return (
@@ -536,13 +537,13 @@ export function ProposalProvider({
         proposal,
         proposalNumber,
         markets,
-        orders,
+        openOrdersAccounts: openOrdersAccounts,
         orderBookObject,
         loading,
         isCranking,
         metaDisabled,
         usdcDisabled,
-        fetchOpenOrders,
+        fetchOpenOrdersAccounts,
         fetchMarketsInfo,
         createTokenAccounts,
         createTokenAccountsTransactions,

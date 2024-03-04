@@ -28,7 +28,7 @@ export function UnsettledOrderRow({ order }: { order: OpenOrdersAccountWithKey }
   const wallet = useWallet();
   const { fetchBalance } = useBalances();
   const { generateExplorerLink } = useExplorerConfiguration();
-  const { proposal, fetchOpenOrders, crankMarkets, isCranking } = useProposal();
+  const { proposal, fetchOpenOrdersAccounts, crankMarkets, isCranking } = useProposal();
   const { settleFundsTransactions, closeOpenOrdersAccountTransactions } = useOpenbookTwap();
 
   const [isSettling, setIsSettling] = useState<boolean>(false);
@@ -52,13 +52,13 @@ export function UnsettledOrderRow({ order }: { order: OpenOrdersAccountWithKey }
       if (!txs) return;
 
       await sender.send(txs);
-      await fetchOpenOrders(wallet.publicKey);
+      await fetchOpenOrdersAccounts(wallet.publicKey);
       fetchBalance((pass ? markets.pass : markets.fail).baseMint);
       fetchBalance((pass ? markets.pass : markets.fail).quoteMint);
     } finally {
       setIsSettling(false);
     }
-  }, [order, proposal, settleFundsTransactions, wallet, fetchOpenOrders, fetchBalance]);
+  }, [order, proposal, settleFundsTransactions, wallet, fetchOpenOrdersAccounts, fetchBalance]);
 
   const handleCloseAccount = useCallback(async () => {
     if (!proposal || !markets) return;
@@ -70,7 +70,7 @@ export function UnsettledOrderRow({ order }: { order: OpenOrdersAccountWithKey }
     setIsClosing(true);
     try {
       await sender.send(txs);
-      fetchOpenOrders(wallet.publicKey);
+      fetchOpenOrdersAccounts(wallet.publicKey);
     } catch (err) {
       console.error(err);
     } finally {

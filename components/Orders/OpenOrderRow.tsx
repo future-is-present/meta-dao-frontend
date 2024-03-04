@@ -20,7 +20,7 @@ import {
   IconCheck,
 } from '@tabler/icons-react';
 import { BN } from '@coral-xyz/anchor';
-import { OpenOrdersAccountWithKey } from '@/lib/types';
+import { OpenOrder, OpenOrdersAccountWithKey } from '@/lib/types';
 import { useExplorerConfiguration } from '@/hooks/useExplorerConfiguration';
 import { useOpenbookTwap } from '@/hooks/useOpenbookTwap';
 import { useTransactionSender } from '@/hooks/useTransactionSender';
@@ -28,13 +28,19 @@ import { NUMERAL_FORMAT, BASE_FORMAT, QUOTE_LOTS } from '@/lib/constants';
 import { useProposal } from '@/contexts/ProposalContext';
 import { isBid, isPartiallyFilled, isPass } from '@/lib/openbook';
 
-export function OpenOrderRow({ order }: { order: OpenOrdersAccountWithKey }) {
+export function OpenOrderRow({
+  openOrdersAccount,
+  order,
+}: {
+  openOrdersAccount: OpenOrdersAccountWithKey;
+  order: OpenOrder;
+}) {
   const { markets } = useProposal();
   const theme = useMantineTheme();
   const sender = useTransactionSender();
   const wallet = useWallet();
   const { generateExplorerLink } = useExplorerConfiguration();
-  const { proposal, fetchOpenOrders } = useProposal();
+  const { proposal, fetchOpenOrdersAccounts } = useProposal();
   const { settleFundsTransactions, cancelOrderTransactions, editOrderTransactions } =
     useOpenbookTwap();
 
@@ -49,8 +55,9 @@ export function OpenOrderRow({ order }: { order: OpenOrdersAccountWithKey }) {
     if (!proposal || !markets) return;
 
     const txs = await cancelOrderTransactions(
-      new BN(order.account.accountNum),
-      proposal.account.openbookPassMarket.equals(order.account.market)
+      openOrdersAccount.publicKey,
+      new BN(openOrdersAccount.account.accountNum),
+      proposal.account.openbookPassMarket.equals(openOrdersAccount.account.market)
         ? { publicKey: proposal.account.openbookPassMarket, account: markets.pass }
         : { publicKey: proposal.account.openbookFailMarket, account: markets.fail },
     );
@@ -62,19 +69,19 @@ export function OpenOrderRow({ order }: { order: OpenOrdersAccountWithKey }) {
       // Filtered undefined already
       await sender.send(txs);
       // We already return above if the wallet doesn't have a public key
-      await fetchOpenOrders(wallet.publicKey!);
+      await fetchOpenOrdersAccounts(wallet.publicKey!);
     } catch (err) {
       console.error(err);
     } finally {
       setIsCanceling(false);
     }
   }, [
-    order,
+    openOrdersAccount,
     proposal,
     markets,
     wallet.publicKey,
     cancelOrderTransactions,
-    fetchOpenOrders,
+    fetchOpenOrdersAccounts,
     sender,
   ]);
 
@@ -82,23 +89,23 @@ export function OpenOrderRow({ order }: { order: OpenOrdersAccountWithKey }) {
     if (!proposal || !markets || !editingOrder) return;
 
     const price =
-      editedPrice ||
-      numeral(order.account.openOrders[0].lockedPrice.toString()).multiply(QUOTE_LOTS).value()!;
+      editedPrice || numeral(order.lockedPrice.toString()).multiply(QUOTE_LOTS).value()!;
     const size =
       editedSize ||
       (isBid(order)
-        ? order.account.position.bidsBaseLots
-        : order.account.position.asksBaseLots
+        ? openOrdersAccount.account.position.bidsBaseLots
+        : openOrdersAccount.account.position.asksBaseLots
       ).toNumber();
     const txs = (
       await editOrderTransactions({
+        openOrdersAccount,
         order,
-        accountIndex: order.account.openOrders[0].clientId,
+        accountIndex: order.clientId,
         amount: size,
         price,
         limitOrder: true,
         ask: !isBid(order),
-        market: isPass(order, proposal)
+        market: isPass(openOrdersAccount, proposal)
           ? { publicKey: proposal.account.openbookPassMarket, account: markets.pass }
           : { publicKey: proposal.account.openbookFailMarket, account: markets.fail },
       })
@@ -109,20 +116,20 @@ export function OpenOrderRow({ order }: { order: OpenOrdersAccountWithKey }) {
     try {
       setIsEditing(true);
       await sender.send(txs);
-      await fetchOpenOrders(wallet.publicKey);
+      await fetchOpenOrdersAccounts(wallet.publicKey);
       setEditingOrder(undefined);
     } finally {
       setIsEditing(false);
     }
   }, [
-    order,
+    openOrdersAccount,
     proposal,
     markets,
     wallet.publicKey,
     editedSize,
     editedPrice,
     editOrderTransactions,
-    fetchOpenOrders,
+    fetchOpenOrdersAccounts,
     sender,
   ]);
 
@@ -131,9 +138,9 @@ export function OpenOrderRow({ order }: { order: OpenOrdersAccountWithKey }) {
 
     setIsSettling(true);
     try {
-      const pass = order.account.market.equals(proposal.account.openbookPassMarket);
+      const pass = openOrdersAccount.account.market.equals(proposal.account.openbookPassMarket);
       const txs = await settleFundsTransactions(
-        order.account.accountNum,
+        openOrdersAccount.account.accountNum,
         pass,
         proposal,
         pass
@@ -146,92 +153,88 @@ export function OpenOrderRow({ order }: { order: OpenOrdersAccountWithKey }) {
     } finally {
       setIsSettling(false);
     }
-  }, [order, proposal, settleFundsTransactions]);
+  }, [openOrdersAccount, proposal, settleFundsTransactions]);
 
   return (
-    <Table.Tr key={order.publicKey.toString()}>
+    <Table.Tr key={openOrdersAccount.publicKey.toString()}>
       <Table.Td>
         <a
-          href={generateExplorerLink(order.publicKey.toString(), 'account')}
+          href={generateExplorerLink(openOrdersAccount.publicKey.toString(), 'account')}
           target="_blank"
           rel="noreferrer"
         >
-          {order.account.accountNum}
+          {openOrdersAccount.account.accountNum}
         </a>
       </Table.Td>
       <Table.Td>
         <Group justify="flex-start" align="center" gap={10}>
           <IconWriting
-            color={isPass(order, proposal) ? theme.colors.green[9] : theme.colors.red[9]}
+            color={
+              isPass(openOrdersAccount, proposal) ? theme.colors.green[9] : theme.colors.red[9]
+            }
             scale="xs"
           />
           <Stack gap={0} justify="flex-start" align="flex-start">
-            <Text>{isPass(order, proposal) ? 'PASS' : 'FAIL'}</Text>
+            <Text>{isPass(openOrdersAccount, proposal) ? 'PASS' : 'FAIL'}</Text>
             <Text size="xs" c={isBid(order) ? theme.colors.green[9] : theme.colors.red[9]}>
               {isBid(order) ? 'Bid' : 'Ask'}
             </Text>
           </Stack>
         </Group>
       </Table.Td>
-      <Table.Td>{isPartiallyFilled(order) ? 'Partial Fill' : 'Open'}</Table.Td>
+      <Table.Td>{isPartiallyFilled(openOrdersAccount) ? 'Partial Fill' : 'Open'}</Table.Td>
       <Table.Td>
         {/* Size */}
-        {editingOrder === order ? (
+        {editingOrder === openOrdersAccount ? (
           <Input
             w="5rem"
             variant="filled"
             defaultValue={numeral(
               isBid(order)
-                ? order.account.position.bidsBaseLots
-                : order.account.position.asksBaseLots,
+                ? openOrdersAccount.account.position.bidsBaseLots
+                : openOrdersAccount.account.position.asksBaseLots,
             ).format(BASE_FORMAT)}
             onChange={(e) => setEditedSize(Number(e.target.value))}
           />
         ) : (
           numeral(
             isBid(order)
-              ? order.account.position.bidsBaseLots
-              : order.account.position.asksBaseLots,
+              ? openOrdersAccount.account.position.bidsBaseLots
+              : openOrdersAccount.account.position.asksBaseLots,
           ).format(BASE_FORMAT)
         )}
       </Table.Td>
       <Table.Td>
         {/* Price */}
-        {editingOrder === order ? (
+        {editingOrder === openOrdersAccount ? (
           <Input
             w="5rem"
             variant="filled"
-            defaultValue={numeral(order.account.openOrders[0].lockedPrice * QUOTE_LOTS).format(
-              NUMERAL_FORMAT,
-            )}
+            defaultValue={numeral(order.lockedPrice * QUOTE_LOTS).format(NUMERAL_FORMAT)}
             onChange={(e) => setEditedPrice(Number(e.target.value))}
           />
         ) : (
-          `$${numeral(order.account.openOrders[0].lockedPrice * QUOTE_LOTS).format(NUMERAL_FORMAT)}`
+          `$${numeral(order.lockedPrice * QUOTE_LOTS).format(NUMERAL_FORMAT)}`
         )}
       </Table.Td>
       <Table.Td>
         {/* Notional */}$
-        {editingOrder === order
+        {editingOrder === openOrdersAccount
           ? numeral(
-              (editedPrice || order.account.openOrders[0].lockedPrice * QUOTE_LOTS) *
+              (editedPrice || order.lockedPrice * QUOTE_LOTS) *
                 (editedSize ||
                   (isBid(order)
-                    ? order.account.position.bidsBaseLots
-                    : order.account.position.asksBaseLots)),
+                    ? openOrdersAccount.account.position.bidsBaseLots
+                    : openOrdersAccount.account.position.asksBaseLots)),
             ).format(NUMERAL_FORMAT)
           : numeral(
               isBid(order)
-                ? order.account.position.bidsBaseLots *
-                    order.account.openOrders[0].lockedPrice *
-                    QUOTE_LOTS
-                : order.account.position.asksBaseLots *
-                    order.account.openOrders[0].lockedPrice *
-                    QUOTE_LOTS,
+                ? openOrdersAccount.account.position.bidsBaseLots * order.lockedPrice * QUOTE_LOTS
+                : openOrdersAccount.account.position.asksBaseLots * order.lockedPrice * QUOTE_LOTS,
             ).format(NUMERAL_FORMAT)}
       </Table.Td>
       <Table.Td>
-        {isPartiallyFilled(order) && (
+        {isPartiallyFilled(openOrdersAccount) && (
           <Tooltip label="Settle funds">
             <ActionIcon variant="outline" loading={isSettling} onClick={() => handleSettleFunds()}>
               <Icon3dRotate />
@@ -239,12 +242,15 @@ export function OpenOrderRow({ order }: { order: OpenOrdersAccountWithKey }) {
           </Tooltip>
         )}
         <Group gap="sm">
-          <Tooltip label="Cancel order" events={{ hover: true, focus: true, touch: false }}>
+          <Tooltip
+            label="Cancel openOrdersAccount"
+            events={{ hover: true, focus: true, touch: false }}
+          >
             <ActionIcon variant="outline" loading={isCanceling} onClick={() => handleCancel()}>
               <IconTrash />
             </ActionIcon>
           </Tooltip>
-          {editingOrder === order ? (
+          {editingOrder === openOrdersAccount ? (
             <Group gap="0.1rem">
               <Tooltip label="Submit" events={{ hover: true, focus: true, touch: false }}>
                 <ActionIcon
@@ -267,8 +273,14 @@ export function OpenOrderRow({ order }: { order: OpenOrdersAccountWithKey }) {
               </Tooltip>
             </Group>
           ) : (
-            <Tooltip label="Edit order" events={{ hover: true, focus: true, touch: false }}>
-              <ActionIcon variant="outline" onClick={() => setEditingOrder(() => order)}>
+            <Tooltip
+              label="Edit openOrdersAccount"
+              events={{ hover: true, focus: true, touch: false }}
+            >
+              <ActionIcon
+                variant="outline"
+                onClick={() => setEditingOrder(() => openOrdersAccount)}
+              >
                 <IconEdit />
               </ActionIcon>
             </Tooltip>

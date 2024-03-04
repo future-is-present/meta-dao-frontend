@@ -24,6 +24,7 @@ import { OPENBOOK_PROGRAM_ID, OPENBOOK_TWAP_PROGRAM_ID, QUOTE_LOTS } from '@/lib
 import {
   FillEvent,
   MarketAccountWithKey,
+  OpenOrder,
   OpenOrdersAccountWithKey,
   OutEvent,
   ProposalAccountWithKey,
@@ -32,8 +33,9 @@ import { shortKey } from '@/lib/utils';
 import { useProvider } from '@/hooks/useProvider';
 import {
   createOpenOrdersIndexerInstruction,
-  createOpenOrdersInstruction,
-  findOpenOrders,
+  createOpenOrdersAccountInstruction,
+  findOpenOrdersAccount,
+  findOpenOrdersForMarket,
   findOpenOrdersIndexer,
 } from '../lib/openbook';
 import { useConditionalVault } from './useConditionalVault';
@@ -137,15 +139,28 @@ export function useOpenbookTwap() {
         indexOffset,
         signer: wallet.publicKey,
       });
-      const [ixs, openOrdersAccount] = await createOpenOrdersInstruction(
+
+      const openOrders = await findOpenOrdersForMarket(
         openbook.program,
-        market.publicKey,
-        accountIndex,
-        `${shortKey(wallet.publicKey)}-${accountIndex.toString()}`,
         wallet.publicKey,
-        openOrdersIndexer,
+        market.publicKey,
       );
-      openTx.add(...ixs);
+      let openOrdersAccount: PublicKey;
+      if (openOrders.length > 0) {
+        // Set default to the first ooa found
+        openOrdersAccount = openOrders[0];
+      } else {
+        const [ixs, ooa] = await createOpenOrdersAccountInstruction(
+          openbook.program,
+          market.publicKey,
+          accountIndex,
+          `${shortKey(wallet.publicKey)}-${accountIndex.toString()}`,
+          wallet.publicKey,
+          openOrdersIndexer,
+        );
+        openTx.add(...ixs);
+        openOrdersAccount = ooa;
+      }
 
       const args = createPlaceOrderArgs({ amount, price, limitOrder, ask, accountIndex });
 
@@ -271,7 +286,7 @@ export function useOpenbookTwap() {
 
   const settleFundsTransactions = useCallback(
     async (
-      orderId: BN | number,
+      accountNum: BN | number,
       passMarket: boolean,
       proposal: ProposalAccountWithKey,
       market: MarketAccountWithKey,
@@ -282,7 +297,7 @@ export function useOpenbookTwap() {
 
       const quoteVault = await getVaultMint(proposal.account.quoteVault);
       const baseVault = await getVaultMint(proposal.account.baseVault);
-      const openOrdersAccount = findOpenOrders(new BN(orderId), wallet.publicKey);
+      const openOrdersAccount = findOpenOrdersAccount(new BN(accountNum), wallet.publicKey);
       // TODO: Determine if order is on pass or fail market?
       const userBasePass = getAssociatedTokenAddressSync(
         baseVault.conditionalOnFinalizeTokenMint,
@@ -344,13 +359,13 @@ export function useOpenbookTwap() {
   );
 
   const closeOpenOrdersAccountTransactions = useCallback(
-    async (orderId: BN) => {
+    async (accountNum: BN) => {
       if (!wallet.publicKey || !openbook) {
         throw new Error('Some variables are not initialized yet...');
       }
 
       const openOrdersIndexer = findOpenOrdersIndexer(wallet.publicKey);
-      const openOrdersAccount = findOpenOrders(orderId, wallet.publicKey);
+      const openOrdersAccount = findOpenOrdersAccount(accountNum, wallet.publicKey);
       const closeTx = await openbook.program.methods
         .closeOpenOrdersAccount()
         .accounts({
@@ -367,14 +382,13 @@ export function useOpenbookTwap() {
   );
 
   const cancelOrderTransactions = useCallback(
-    async (orderId: BN, market: MarketAccountWithKey) => {
+    async (openOrdersAccount: PublicKey, accountNum: BN, market: MarketAccountWithKey) => {
       if (!wallet.publicKey || !openbook || !openbookTwap) {
         throw new Error('Some variables are not initialized yet...');
       }
 
-      const openOrdersAccount = findOpenOrders(orderId, wallet.publicKey);
       const placeTx = await openbookTwap.methods
-        .cancelOrderByClientId(orderId)
+        .cancelOrderByClientId(accountNum)
         .accounts({
           openOrdersAccount,
           asks: market.account.asks,
@@ -395,14 +409,14 @@ export function useOpenbookTwap() {
 
   const cancelAndPlaceOrdersTransactions = useCallback(
     async ({
-      orderId,
+      accountNum,
       amount,
       price,
       limitOrder,
       ask,
       market,
     }: {
-      orderId: BN;
+      accountNum: BN;
       amount: number;
       price: number;
       limitOrder: boolean;
@@ -415,7 +429,7 @@ export function useOpenbookTwap() {
 
       // This can only affect orders stored in the same open orders account (OOA)
       // We derive this OOA from the first passed ID
-      const openOrdersAccount = findOpenOrders(orderId, wallet.publicKey);
+      const openOrdersAccount = findOpenOrdersAccount(accountNum, wallet.publicKey);
       const userBaseAccount = getAssociatedTokenAddressSync(
         market.account.baseMint,
         wallet.publicKey,
@@ -424,9 +438,15 @@ export function useOpenbookTwap() {
         market.account.quoteMint,
         wallet.publicKey,
       );
-      const args = createPlaceOrderArgs({ amount, price, limitOrder, ask, accountIndex: orderId });
+      const args = createPlaceOrderArgs({
+        amount,
+        price,
+        limitOrder,
+        ask,
+        accountIndex: accountNum,
+      });
       const editTx = await openbookTwap.methods
-        .cancelAndPlaceOrders([orderId], [args])
+        .cancelAndPlaceOrders([accountNum], [args])
         .accounts({
           market: market.publicKey,
           asks: market.account.asks,
@@ -463,6 +483,7 @@ export function useOpenbookTwap() {
 
   const editOrderTransactions = useCallback(
     async ({
+      openOrdersAccount,
       order,
       accountIndex,
       amount,
@@ -471,7 +492,8 @@ export function useOpenbookTwap() {
       ask,
       market,
     }: {
-      order: OpenOrdersAccountWithKey;
+      openOrdersAccount: OpenOrdersAccountWithKey;
+      order: OpenOrder;
       accountIndex: BN;
       amount: number;
       price: number;
@@ -483,7 +505,6 @@ export function useOpenbookTwap() {
         return;
       }
 
-      const openOrdersAccount = findOpenOrders(new BN(order.account.accountNum), wallet.publicKey);
       const args = createPlaceOrderArgs({
         amount,
         price,
@@ -491,14 +512,15 @@ export function useOpenbookTwap() {
         ask,
         accountIndex,
       });
+      // TODO binye this is wrong
       const expectedCancelSize = ask
-        ? order.account.position.asksBaseLots.sub(new BN(amount)).abs()
-        : new BN(amount).sub(order.account.position.bidsBaseLots).abs();
+        ? openOrdersAccount.account.position.asksBaseLots.sub(new BN(amount)).abs()
+        : new BN(amount).sub(openOrdersAccount.account.position.bidsBaseLots).abs();
       const mint = ask ? market.account.baseMint : market.account.quoteMint;
       const marketVault = ask ? market.account.marketBaseVault : market.account.marketQuoteVault;
       const userTokenAccount = getAssociatedTokenAddressSync(mint, wallet.publicKey);
       const editTx = await openbookTwap.methods
-        .editOrder(new BN(order.account.accountNum), expectedCancelSize, args)
+        .editOrder(new BN(openOrdersAccount.account.accountNum), expectedCancelSize, args)
         .accounts({
           market: market.publicKey,
           asks: market.account.asks,
@@ -506,7 +528,7 @@ export function useOpenbookTwap() {
           eventHeap: market.account.eventHeap,
           marketVault,
           twapMarket: getTwapMarketKey(market.publicKey),
-          openOrdersAccount,
+          openOrdersAccount: openOrdersAccount.publicKey,
           userTokenAccount,
           openbookProgram: OPENBOOK_PROGRAM_ID,
         })

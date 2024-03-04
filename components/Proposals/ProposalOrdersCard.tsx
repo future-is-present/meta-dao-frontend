@@ -2,24 +2,18 @@ import { ActionIcon, Group, Loader, Stack, Tabs, Text } from '@mantine/core';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { IconRefresh } from '@tabler/icons-react';
 import { useProposal } from '@/contexts/ProposalContext';
-import {
-  isCompletedOrder,
-  isEmptyOrder,
-  isOpenOrder,
-  totalMetaInOrder,
-  totalUsdcInOrder,
-} from '@/lib/openbook';
-import { OpenOrdersTab } from '@/components/Orders/OpenOrdersTab';
+import { totalMetaInOrder, totalUsdcInOrder } from '@/lib/openbook';
+import { OpenOrdersAccountTab } from '@/components/Orders/OpenOrdersAccountTab';
 import { UnsettledOrdersTab } from '@/components/Orders/UnsettledOrdersTab';
 import { UncrankedOrdersTab } from '@/components/Orders/UncrankedOrdersTab';
+import { PublicKey } from '@solana/web3.js';
 
 export function ProposalOrdersCard() {
   const wallet = useWallet();
-  const { fetchOpenOrders, proposal, orders, markets } = useProposal();
+  const { fetchOpenOrdersAccounts, proposal, openOrdersAccounts, markets } = useProposal();
+  if (!openOrdersAccounts || !markets) return <></>;
 
-  if (!orders || !markets) return <></>;
-
-  return !proposal || !markets || !orders ? (
+  return !proposal || !markets || !openOrdersAccounts ? (
     <Group justify="center" w="100%" h="100%">
       <Loader />
     </Group>
@@ -33,14 +27,14 @@ export function ProposalOrdersCard() {
           <Group justify="space-between" align="flex-start">
             <Text size="lg">
               <Text span fw="bold">
-                ${totalUsdcInOrder(orders)}
+                ${totalUsdcInOrder(openOrdersAccounts)}
               </Text>{' '}
               condUSDC
             </Text>
             <Text>|</Text>
             <Text size="lg">
               <Text span fw="bold">
-                {totalMetaInOrder(orders)}
+                {totalMetaInOrder(openOrdersAccounts)}
               </Text>{' '}
               condMETA
             </Text>
@@ -48,7 +42,7 @@ export function ProposalOrdersCard() {
           <ActionIcon
             variant="subtle"
             // @ts-ignore
-            onClick={() => fetchOpenOrders(wallet.publicKey)}
+            onClick={() => fetchOpenOrdersAccounts(wallet.publicKey)}
           >
             <IconRefresh />
           </ActionIcon>
@@ -62,13 +56,23 @@ export function ProposalOrdersCard() {
           <Tabs.Tab value="unsettled">Unsettled</Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="open">
-          <OpenOrdersTab orders={orders.filter((order) => isOpenOrder(order, markets))} />
+          <OpenOrdersAccountTab
+            openOrdersAccounts={openOrdersAccounts}
+            market={proposal.account.openbookPassMarket}
+          />
         </Tabs.Panel>
+        <Tabs.Panel value="open">
+          <OpenOrdersAccountTab
+            openOrdersAccounts={openOrdersAccounts}
+            market={proposal.account.openbookFailMarket}
+          />
+        </Tabs.Panel>
+        {/* TODO binye */}
         <Tabs.Panel value="uncranked">
-          <UncrankedOrdersTab orders={orders.filter((order) => isCompletedOrder(order, markets))} />
+          <UncrankedOrdersTab openOrdersAccount={openOrdersAccounts} />
         </Tabs.Panel>
         <Tabs.Panel value="unsettled">
-          <UnsettledOrdersTab orders={orders.filter((order) => isEmptyOrder(order))} />
+          <UnsettledOrdersTab openOrdersAccounts={openOrdersAccounts} />
         </Tabs.Panel>
       </Tabs>
     </>

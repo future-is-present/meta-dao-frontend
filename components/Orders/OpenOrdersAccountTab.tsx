@@ -1,22 +1,28 @@
 import { useCallback, useState } from 'react';
 import { Stack, Table, Button, Group, Text } from '@mantine/core';
 import { useWallet } from '@solana/wallet-adapter-react';
-import { Transaction } from '@solana/web3.js';
+import { PublicKey, Transaction } from '@solana/web3.js';
 import { BN } from '@coral-xyz/anchor';
-import { OpenOrdersAccountWithKey } from '@/lib/types';
+import { OpenOrder, OpenOrdersAccountWithKey } from '@/lib/types';
 import { useOpenbookTwap } from '@/hooks/useOpenbookTwap';
 import { useTransactionSender } from '@/hooks/useTransactionSender';
 import { useProposal } from '@/contexts/ProposalContext';
-import { isPartiallyFilled } from '@/lib/openbook';
 import { OpenOrderRow } from './OpenOrderRow';
 
 const headers = ['Order ID', 'Market', 'Status', 'Size', 'Price', 'Notional', 'Actions'];
 
-export function OpenOrdersTab({ orders }: { orders: OpenOrdersAccountWithKey[] }) {
+// TODO binye it assumes there are only two types of markets proposal.account.openbookPassMarket or proposal.account.openbookFailMarket so no need the PublicKey
+export function OpenOrdersAccountTab({
+  openOrdersAccounts,
+  market,
+}: {
+  openOrdersAccounts: OpenOrdersAccountWithKey[];
+  market: PublicKey;
+}) {
   const { markets, isCranking, crankMarkets } = useProposal();
   const sender = useTransactionSender();
   const wallet = useWallet();
-  const { fetchOpenOrders, proposal } = useProposal();
+  const { fetchOpenOrdersAccounts, proposal } = useProposal();
   const { cancelOrderTransactions, settleFundsTransactions } = useOpenbookTwap();
 
   const [isCanceling, setIsCanceling] = useState<boolean>(false);
@@ -27,31 +33,40 @@ export function OpenOrdersTab({ orders }: { orders: OpenOrdersAccountWithKey[] }
 
     const txs = (
       await Promise.all(
-        orders.map((order) =>
-          cancelOrderTransactions(
-            new BN(order.account.accountNum),
-            proposal.account.openbookPassMarket.equals(order.account.market)
-              ? { publicKey: proposal.account.openbookPassMarket, account: markets.pass }
-              : { publicKey: proposal.account.openbookFailMarket, account: markets.fail },
-          ),
-        ),
+        openOrdersAccounts.map((openOrdersAccount) => {
+          openOrdersAccount.account.openOrders.map((order) =>
+            cancelOrderTransactions(
+              openOrdersAccount.publicKey,
+              new BN(order.clientId),
+              proposal.account.openbookPassMarket.equals(market)
+                ? { publicKey: market, account: markets.pass }
+                : { publicKey: market, account: markets.fail },
+            ),
+          );
+        }),
       )
     ).flat();
 
     if (!wallet.publicKey || !txs) return;
-
     try {
       setIsCanceling(true);
       // Filtered undefined already
       await sender.send(txs);
       // We already return above if the wallet doesn't have a public key
-      await fetchOpenOrders(wallet.publicKey!);
+      await fetchOpenOrdersAccounts(wallet.publicKey!);
     } catch (err) {
       console.error(err);
     } finally {
       setIsCanceling(false);
     }
-  }, [proposal, markets, wallet.publicKey, cancelOrderTransactions, fetchOpenOrders, sender]);
+  }, [
+    proposal,
+    markets,
+    wallet.publicKey,
+    cancelOrderTransactions,
+    fetchOpenOrdersAccounts,
+    sender,
+  ]);
 
   const handleSettleAllFunds = useCallback(async () => {
     if (!proposal || !markets) return;
@@ -59,20 +74,25 @@ export function OpenOrdersTab({ orders }: { orders: OpenOrdersAccountWithKey[] }
     setIsSettling(true);
     try {
       // HACK: Assumes all orders are for the same market
-      const pass = orders[0].account.market.equals(proposal.account.openbookPassMarket);
+      const pass = market.equals(proposal.account.openbookPassMarket);
       const txs = (
         await Promise.all(
-          orders
-            .filter((order) => isPartiallyFilled(order))
-            .map((order) =>
-              settleFundsTransactions(
-                order.account.accountNum,
-                pass,
-                proposal,
-                pass
-                  ? { account: markets.pass, publicKey: proposal.account.openbookPassMarket }
-                  : { account: markets.fail, publicKey: proposal.account.openbookFailMarket },
-              ),
+          openOrdersAccounts
+            .filter(
+              (ooa) =>
+                ooa.account.position.quoteFreeNative.toNumber() != 0 ||
+                ooa.account.position.baseFreeNative.toNumber() != 0,
+            )
+            .map(
+              async (ooa) =>
+                await settleFundsTransactions(
+                  ooa.account.accountNum,
+                  pass,
+                  proposal,
+                  pass
+                    ? { account: markets.pass, publicKey: market }
+                    : { account: markets.fail, publicKey: market },
+                ),
             ),
         )
       )
@@ -84,7 +104,7 @@ export function OpenOrdersTab({ orders }: { orders: OpenOrdersAccountWithKey[] }
     } finally {
       setIsSettling(false);
     }
-  }, [orders, proposal, settleFundsTransactions]);
+  }, [openOrdersAccounts, proposal, settleFundsTransactions]);
 
   return (
     <Stack py="md">
@@ -103,12 +123,16 @@ export function OpenOrdersTab({ orders }: { orders: OpenOrdersAccountWithKey[] }
           loading={isSettling}
           color="blue"
           onClick={handleSettleAllFunds}
-          disabled={!orders.filter((order) => isPartiallyFilled(order)).length}
+          disabled={openOrdersAccounts.every(
+            (ooa) =>
+              ooa.account.position.quoteFreeNative.toNumber() == 0 &&
+              ooa.account.position.baseFreeNative.toNumber() == 0,
+          )}
         >
-          Settle {orders.filter((order) => isPartiallyFilled(order)).length} orders
+          Settle open orders accounts
         </Button>
       </Group>
-      {orders && orders.length > 0 ? (
+      {openOrdersAccounts && openOrdersAccounts.length > 0 ? (
         <Table>
           <Table.Thead>
             <Table.Tr>
@@ -118,9 +142,11 @@ export function OpenOrdersTab({ orders }: { orders: OpenOrdersAccountWithKey[] }
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
-            {orders.map((order) => (
-              <OpenOrderRow key={order.publicKey.toString()} order={order} />
-            ))}
+            {openOrdersAccounts.map((ooa) =>
+              ooa.account.openOrders.map((order) => (
+                <OpenOrderRow key={order.id.toString()} openOrdersAccount={ooa} order={order} />
+              )),
+            )}
           </Table.Tbody>
         </Table>
       ) : (

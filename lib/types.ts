@@ -100,6 +100,7 @@ export type MarketAccount = IdlAccounts<OpenbookV2>['market'];
 export type MarketAccountWithKey = AccountWithKey<MarketAccount>;
 export type OpenOrdersAccount = IdlAccounts<OpenbookV2>['openOrdersAccount'];
 export type OpenOrdersAccountWithKey = AccountWithKey<OpenOrdersAccount>;
+export type OpenOrder = IdlTypes<OpenbookV2>['OpenOrder'];
 export type AllOrders = { [proposalKey: string]: OpenOrdersAccountWithKey[] };
 export type OpenOrdersIndexerAccount = IdlAccounts<OpenbookV2>['openOrdersIndexer'];
 export type EventHeapAccount = IdlAccounts<OpenbookV2>['eventHeap'];

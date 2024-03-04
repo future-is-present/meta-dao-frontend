@@ -7,16 +7,20 @@ import { OpenOrdersAccountWithKey } from '@/lib/types';
 import { useOpenbookTwap } from '@/hooks/useOpenbookTwap';
 import { useTransactionSender } from '@/hooks/useTransactionSender';
 import { useProposal } from '@/contexts/ProposalContext';
-import { isClosableOrder, isPartiallyFilled } from '@/lib/openbook';
+import { isClosableOpenOrdersAccount, isPartiallyFilled } from '@/lib/openbook';
 import { UnsettledOrderRow } from './UnsettledOrderRow';
 import { useBalances } from '../../contexts/BalancesContext';
 
 const headers = ['Order ID', 'Market', 'Claimable', 'Actions'];
 
-export function UnsettledOrdersTab({ orders }: { orders: OpenOrdersAccountWithKey[] }) {
+export function UnsettledOrdersTab({
+  openOrdersAccounts,
+}: {
+  openOrdersAccounts: OpenOrdersAccountWithKey[];
+}) {
   const sender = useTransactionSender();
   const wallet = useWallet();
-  const { proposal, markets, fetchOpenOrders } = useProposal();
+  const { proposal, markets, fetchOpenOrdersAccounts } = useProposal();
   const { fetchBalance } = useBalances();
   const { settleFundsTransactions, closeOpenOrdersAccountTransactions } = useOpenbookTwap();
 
@@ -24,10 +28,15 @@ export function UnsettledOrdersTab({ orders }: { orders: OpenOrdersAccountWithKe
   const [isClosing, setIsClosing] = useState<boolean>(false);
 
   const ordersToSettle = useMemo(
-    () => orders.filter((order) => isPartiallyFilled(order)),
-    [orders],
+    () => openOrdersAccounts.filter((order) => isPartiallyFilled(order)),
+    [openOrdersAccounts],
   );
-  const ordersToClose = useMemo(() => orders.filter((order) => isClosableOrder(order)), [orders]);
+  const openOrdersAccountToClose = useMemo(() => {
+    const possibleDuplicateOoa = openOrdersAccounts.filter((order) =>
+      isClosableOpenOrdersAccount(order),
+    );
+    return [...new Set(possibleDuplicateOoa)];
+  }, [openOrdersAccounts]);
 
   const handleSettleAllFunds = useCallback(async () => {
     if (!proposal || !markets || !wallet?.publicKey) return;
@@ -54,7 +63,7 @@ export function UnsettledOrdersTab({ orders }: { orders: OpenOrdersAccountWithKe
 
       if (!txs) return;
       await sender.send(txs as Transaction[]);
-      fetchOpenOrders(wallet.publicKey);
+      fetchOpenOrdersAccounts(wallet.publicKey);
       fetchBalance(markets.pass.baseMint);
       fetchBalance(markets.pass.quoteMint);
       fetchBalance(markets.fail.baseMint);
@@ -68,7 +77,7 @@ export function UnsettledOrdersTab({ orders }: { orders: OpenOrdersAccountWithKe
     proposal,
     sender,
     settleFundsTransactions,
-    fetchOpenOrders,
+    fetchOpenOrdersAccounts,
     fetchBalance,
   ]);
 
@@ -80,7 +89,7 @@ export function UnsettledOrdersTab({ orders }: { orders: OpenOrdersAccountWithKe
     try {
       const txs = (
         await Promise.all(
-          ordersToClose.map((order) =>
+          openOrdersAccountToClose.map((order) =>
             closeOpenOrdersAccountTransactions(new BN(order.account.accountNum)),
           ),
         )
@@ -91,15 +100,55 @@ export function UnsettledOrdersTab({ orders }: { orders: OpenOrdersAccountWithKe
       if (!txs) return;
       await sender.send(txs as Transaction[]);
     } finally {
-      fetchOpenOrders(wallet.publicKey);
+      fetchOpenOrdersAccounts(wallet.publicKey);
       setIsClosing(false);
     }
-  }, [ordersToClose, markets, proposal, sender, settleFundsTransactions, fetchOpenOrders]);
+  }, [
+    openOrdersAccountToClose,
+    markets,
+    proposal,
+    sender,
+    settleFundsTransactions,
+    fetchOpenOrdersAccounts,
+  ]);
+
+  const handleCloseAllOpenOrdersAccountsExceptOne = useCallback(async () => {
+    if (!proposal || !markets || !wallet?.publicKey) return;
+
+    setIsClosing(true);
+
+    try {
+      // Remove the first element to we leave one open openOrdersAccounts account open for future trades in this market
+      openOrdersAccountToClose.shift();
+      const txs = (
+        await Promise.all(
+          openOrdersAccountToClose.map((order) =>
+            closeOpenOrdersAccountTransactions(new BN(order.account.accountNum)),
+          ),
+        )
+      )
+        .flat()
+        .filter(Boolean);
+
+      if (!txs) return;
+      await sender.send(txs as Transaction[]);
+    } finally {
+      fetchOpenOrdersAccounts(wallet.publicKey);
+      setIsClosing(false);
+    }
+  }, [
+    openOrdersAccountToClose,
+    markets,
+    proposal,
+    sender,
+    settleFundsTransactions,
+    fetchOpenOrdersAccounts,
+  ]);
 
   return (
     <Stack py="md">
       <Text size="sm">
-        These are your Order Accounts (OpenBook uses a{' '}
+        These are your Open Order Accounts (OpenBook uses a{' '}
         <a
           href="https://twitter.com/openbookdex/status/1727309884159299929?s=61&t=Wv1hCdAly84RMB_iLO0iIQ"
           target="_blank"
@@ -107,9 +156,10 @@ export function UnsettledOrdersTab({ orders }: { orders: OpenOrdersAccountWithKe
         >
           crank
         </a>{' '}
-        and to do that when you place an order you create an account for that order). If you see a
-        balance here you can settle the balance (to have it returned to your wallet for futher use
-        while the proposal is active). Once settled, you can close the account to reclaim the SOL.
+        and to do that when you place an order you create an account that store openOrdersAccounts).
+        If you see a balance here you can settle the balance (to have it returned to your wallet for
+        further use while the proposal is active). Once settled and the proposal is finished, you
+        can close the open openOrdersAccounts account to reclaim the SOL.
       </Text>
       <Group>
         <Button
@@ -120,16 +170,17 @@ export function UnsettledOrdersTab({ orders }: { orders: OpenOrdersAccountWithKe
         >
           Settle {ordersToSettle.length} Orders
         </Button>
-        <Button
+
+        <Button // TODO: Binye this is a hack for now, get rid of this once all ooa have been closed
           variant="outline"
           loading={isClosing}
-          onClick={handleCloseAllOrders}
-          disabled={ordersToClose.length === 0}
+          onClick={handleCloseAllOpenOrdersAccountsExceptOne}
+          disabled={openOrdersAccountToClose.length < 2}
         >
-          Close {ordersToClose.length} Orders
+          Close unnecessary Open Orders Accounts
         </Button>
       </Group>
-      {orders && orders.length > 0 ? (
+      {openOrdersAccounts && openOrdersAccounts.length > 0 ? (
         <Table>
           <Table.Thead>
             <Table.Tr>
@@ -139,7 +190,7 @@ export function UnsettledOrdersTab({ orders }: { orders: OpenOrdersAccountWithKe
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
-            {orders.map((order) => (
+            {openOrdersAccounts.map((order) => (
               <UnsettledOrderRow key={order.publicKey.toString()} order={order} />
             ))}
           </Table.Tbody>

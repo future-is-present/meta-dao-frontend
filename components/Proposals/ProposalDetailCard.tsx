@@ -22,7 +22,7 @@ import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import { IconChevronLeft } from '@tabler/icons-react';
 import { useMediaQuery } from '@mantine/hooks';
 import { TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
-import { SystemProgram } from '@solana/web3.js';
+import { PublicKey, SystemProgram } from '@solana/web3.js';
 import { BN } from '@coral-xyz/anchor';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 import { ProposalOrdersCard } from './ProposalOrdersCard';
@@ -40,7 +40,7 @@ import ExternalLink from '../ExternalLink';
 import MarketsBalances from './MarketsBalances';
 import classes from '../../app/globals.module.css';
 import { useTokens } from '../../hooks/useTokens';
-import { isClosableOrder, isEmptyOrder, isOpenOrder, isPartiallyFilled } from '../../lib/openbook';
+import { isClosableOpenOrdersAccount } from '../../lib/openbook';
 import { useOpenbookTwap } from '../../hooks/useOpenbookTwap';
 import { Networks, useNetworkConfiguration } from '../../hooks/useNetworkConfiguration';
 import { useBalances } from '../../contexts/BalancesContext';
@@ -54,13 +54,17 @@ export function ProposalDetailCard() {
   const { fetchProposals, daoTreasury, daoState } = useAutocrat();
   const { redeemTokensTransactions } = useConditionalVault();
   const { tokens } = useTokens();
-  const { proposal, markets, orders, finalizeProposalTransactions, fetchOpenOrders } =
-    useProposal();
+  const {
+    proposal,
+    markets,
+    openOrdersAccounts,
+    finalizeProposalTransactions,
+    fetchOpenOrdersAccounts,
+  } = useProposal();
   const { cancelOrderTransactions, settleFundsTransactions, closeOpenOrdersAccountTransactions } =
     useOpenbookTwap();
   const sender = useTransactionSender();
   const { colorScheme } = useMantineColorScheme();
-
   const { generateExplorerLink } = useExplorerConfiguration();
   const [lastSlot, setLastSlot] = useState<number>();
   const [secondsLeft, setSecondsLeft] = useState<number>(0);
@@ -216,24 +220,21 @@ export function ProposalDetailCard() {
   }, [tokens, daoTreasury, sender, finalizeProposalTransactions, fetchProposals]);
 
   const handleCloseOrders = useCallback(async () => {
-    if (!proposal || !orders || !markets || !wallet.publicKey) {
+    if (!proposal || !openOrdersAccounts || !markets || !wallet.publicKey) {
       return;
     }
 
-    const openOrders = orders.filter((order) => isOpenOrder(order, markets));
-    // TODO: also handle uncranked orders
-    // const uncrankedOrders = orders.filter((order) => isCompletedOrder(order, markets));
-    const unsettledOrders = orders.filter((order) => isEmptyOrder(order));
-
-    const ordersToSettle = unsettledOrders.filter((order) => isPartiallyFilled(order));
-    const ordersToClose = unsettledOrders.filter((order) => isClosableOrder(order));
+    const openOrdersAccountToClose = openOrdersAccounts.filter((ooa) =>
+      isClosableOpenOrdersAccount(ooa),
+    );
 
     const cancelOpenOrdersTxs = (
       await Promise.all(
-        openOrders.map((order) =>
+        openOrdersAccounts.map((ooa) =>
           cancelOrderTransactions(
-            new BN(order.account.accountNum),
-            proposal.account.openbookPassMarket.equals(order.account.market)
+            ooa.publicKey,
+            ooa.account.accountNum,
+            proposal.account.openbookPassMarket.equals(ooa.account.market)
               ? { publicKey: proposal.account.openbookPassMarket, account: markets.pass }
               : { publicKey: proposal.account.openbookFailMarket, account: markets.fail },
           ),
@@ -243,26 +244,32 @@ export function ProposalDetailCard() {
 
     const settleOrdersTxs = (
       await Promise.all(
-        openOrders.concat(ordersToSettle).map((order) => {
-          const pass = order.account.market.equals(proposal.account.openbookPassMarket);
-          return settleFundsTransactions(
-            order.account.accountNum,
-            pass,
-            proposal,
-            pass
-              ? { account: markets.pass, publicKey: proposal.account.openbookPassMarket }
-              : { account: markets.fail, publicKey: proposal.account.openbookFailMarket },
-          );
-        }),
+        openOrdersAccounts
+          .filter(
+            (ooa) =>
+              ooa.account.position.quoteFreeNative.toNumber() != 0 ||
+              ooa.account.position.baseFreeNative.toNumber() != 0,
+          )
+          .map(async (ooa) => {
+            const pass = ooa.account.market.equals(proposal.account.openbookPassMarket);
+
+            return await settleFundsTransactions(
+              ooa.account.accountNum,
+              pass,
+              proposal,
+              pass
+                ? { account: markets.pass, publicKey: ooa.account.market }
+                : { account: markets.fail, publicKey: ooa.account.market },
+            );
+          }),
       )
     ).flat();
 
     const closeOrdersTxs = (
       await Promise.all(
-        openOrders
-          .concat(ordersToSettle)
-          .concat(ordersToClose)
-          .map((order) => closeOpenOrdersAccountTransactions(new BN(order.account.accountNum))),
+        openOrdersAccountToClose.map((ooa) =>
+          closeOpenOrdersAccountTransactions(new BN(ooa.account.accountNum)),
+        ),
       )
     ).flat();
 
@@ -272,17 +279,17 @@ export function ProposalDetailCard() {
         [cancelOpenOrdersTxs, settleOrdersTxs, closeOrdersTxs].filter((set) => set.length !== 0),
       );
     } finally {
-      fetchOpenOrders(wallet.publicKey);
+      fetchOpenOrdersAccounts(wallet.publicKey);
       setIsClosing(false);
     }
   }, [
-    orders,
+    openOrdersAccounts,
     markets,
     proposal,
     sender,
     wallet.publicKey,
     cancelOrderTransactions,
-    fetchOpenOrders,
+    fetchOpenOrdersAccounts,
   ]);
 
   const handleRedeem = useCallback(async () => {
@@ -423,18 +430,23 @@ export function ProposalDetailCard() {
           <>
             <Button
               loading={isClosing}
-              disabled={(orders?.length || 0) === 0}
+              disabled={(openOrdersAccounts?.length || 0) === 0}
               onClick={handleCloseOrders}
             >
-              Close remaining orders
+              Close remaining openOrdersAccounts
             </Button>
-            {(orders?.length || 0) === 0 ? (
+            {(openOrdersAccounts?.length || 0) === 0 ? (
               <Button color="green" loading={isRedeeming} onClick={handleRedeem}>
                 Redeem
               </Button>
             ) : (
-              <Tooltip label="You have open orders left!">
-                <Button color="green" loading={isRedeeming} variant="outline" onClick={handleRedeem}>
+              <Tooltip label="You have open openOrdersAccounts left!">
+                <Button
+                  color="green"
+                  loading={isRedeeming}
+                  variant="outline"
+                  onClick={handleRedeem}
+                >
                   Redeem
                 </Button>
               </Tooltip>
@@ -445,12 +457,12 @@ export function ProposalDetailCard() {
       <Divider orientation={isMedium ? 'horizontal' : 'vertical'} />
       <Container mt="1rem" p={isMedium ? '0' : 'sm'}>
         <Stack style={{ flex: 1 }}>
-            {markets ? (
-              <Group gap="md" justify="space-around" mt="xl" p="0">
-                <ConditionalMarketCard isPassMarket />
-                <ConditionalMarketCard />
-              </Group>
-            ) : null}
+          {markets ? (
+            <Group gap="md" justify="space-around" mt="xl" p="0">
+              <ConditionalMarketCard isPassMarket />
+              <ConditionalMarketCard />
+            </Group>
+          ) : null}
           <ProposalOrdersCard />
         </Stack>
       </Container>

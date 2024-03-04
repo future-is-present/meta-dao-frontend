@@ -1,5 +1,5 @@
 import { Program, BN } from '@coral-xyz/anchor';
-import { OpenbookV2 } from '@openbook-dex/openbook-v2';
+import { OpenOrdersAccount, OpenOrdersIndexerAccount, OpenbookV2 } from '@openbook-dex/openbook-v2';
 import {
   Keypair,
   PublicKey,
@@ -15,6 +15,7 @@ import {
   BookSideAccount,
   LeafNode,
   Markets,
+  OpenOrder,
   OpenOrdersAccountWithKey,
   OracleConfigParams,
   ProposalAccountWithKey,
@@ -145,7 +146,7 @@ export const createOpenOrdersIndexerInstruction = async (
     })
     .instruction();
 
-export const findOpenOrders = (accountIndex: BN, owner: PublicKey): PublicKey => {
+export const findOpenOrdersAccount = (accountIndex: BN, owner: PublicKey): PublicKey => {
   const [openOrders] = PublicKey.findProgramAddressSync(
     [Buffer.from('OpenOrders'), owner.toBuffer(), accountIndex.toArrayLike(Buffer, 'le', 4)],
     OPENBOOK_PROGRAM_ID,
@@ -153,7 +154,7 @@ export const findOpenOrders = (accountIndex: BN, owner: PublicKey): PublicKey =>
   return openOrders;
 };
 
-export const createOpenOrdersInstruction = async (
+export const createOpenOrdersAccountInstruction = async (
   program: Program<OpenbookV2>,
   market: PublicKey,
   accountIndex: BN,
@@ -168,7 +169,7 @@ export const createOpenOrdersInstruction = async (
       code: 403,
     });
   }
-  const openOrdersAccount = findOpenOrders(accountIndex, owner);
+  const openOrdersAccount = findOpenOrdersAccount(accountIndex, owner);
 
   ixs.push(
     await program.methods
@@ -224,44 +225,47 @@ export function getParsedOrders(side: LeafNode[], isBidSide: boolean): Order[] {
 export const isPass = (order: OpenOrdersAccountWithKey, proposal?: ProposalAccountWithKey) =>
   proposal?.account.openbookPassMarket.equals(order.account.market)!!;
 
-export const isBid = (order: OpenOrdersAccountWithKey) => {
-  const isBidSide = order.account.position.bidsBaseLots.gt(order.account.position.asksBaseLots);
-  if (isBidSide) {
+// If sideAndTree = 0 is a bid if it's 1 is an ask
+export const isBid = (order: OpenOrder) => {
+  if (order.sideAndTree == 0) {
     return true;
+  } else if (order.sideAndTree == 0) {
+    return false;
+  } else {
+    throw 'This is an oracle pegged order';
   }
-  return false;
 };
 
+// TODO binye this is not done
 export const isPartiallyFilled = (order: OpenOrdersAccountWithKey): boolean => {
-  const orderPosition = order.account.position;
-  if (orderPosition.baseFreeNative > BN_0 || orderPosition.quoteFreeNative > BN_0) {
-    return true;
-  }
   return false;
 };
 
-export const isEmptyOrder = (order: OpenOrdersAccountWithKey): boolean =>
-  order.account.openOrders[0].isFree === 1;
+export const isEmptyOrder = (order: OpenOrder): boolean => order.isFree === 1;
 
-export const isClosableOrder = (order: OpenOrdersAccountWithKey): boolean =>
+export const isClosableOpenOrdersAccount = (order: OpenOrdersAccountWithKey): boolean =>
   order.account.position.asksBaseLots.eq(BN_0) &&
   order.account.position.bidsBaseLots.eq(BN_0) &&
   order.account.position.baseFreeNative.eq(BN_0) &&
   order.account.position.quoteFreeNative.eq(BN_0);
 
-export const isOpenOrder = (order: OpenOrdersAccountWithKey, markets: Markets): boolean => {
-  if (order.account.openOrders[0].isFree === 0) {
+export const isOpenOrderStillInBook = (
+  order: OpenOrder,
+  owner: PublicKey,
+  markets: Markets,
+): boolean => {
+  if (order.isFree === 0) {
     const passAsksFilter = markets.passAsks.filter(
-      (_order) => _order.owner.toString() === order.publicKey.toString(),
+      (_order) => _order.owner.toString() === owner.toString(),
     );
     const passBidsFilter = markets.passBids.filter(
-      (_order) => _order.owner.toString() === order.publicKey.toString(),
+      (_order) => _order.owner.toString() === owner.toString(),
     );
     const failAsksFilter = markets.failAsks.filter(
-      (_order) => _order.owner.toString() === order.publicKey.toString(),
+      (_order) => _order.owner.toString() === owner.toString(),
     );
     const failBidsFilter = markets.failBids.filter(
-      (_order) => _order.owner.toString() === order.publicKey.toString(),
+      (_order) => _order.owner.toString() === owner.toString(),
     );
     let _order = null;
     if (failAsksFilter.length > 0) {
@@ -288,13 +292,17 @@ export const isOpenOrder = (order: OpenOrdersAccountWithKey, markets: Markets): 
   return false;
 };
 
-export const isCompletedOrder = (order: OpenOrdersAccountWithKey, markets: Markets): boolean => {
-  const isOpen = isOpenOrder(order, markets);
-  const isEmpty =
-    isEmptyOrder(order) &&
-    (order.account.position.asksBaseLots.gt(BN_0) || order.account.position.bidsBaseLots.gt(BN_0));
-  return isEmpty && !isOpen;
-};
+// export const isCompletedOrder = (
+//   order: OpenOrdersAccountWithKey,
+//   owner: PublicKey,
+//   markets: Markets,
+// ): boolean => {
+//   const isOpen = isOpenOrderStillInBook(order.account.openOrders, owner, markets);
+//   const isEmpty =
+//     isEmptyOrder(order) &&
+//     (order.account.position.asksBaseLots.gt(BN_0) || order.account.position.bidsBaseLots.gt(BN_0));
+//   return isEmpty && !isOpen;
+// };
 
 export const isBidOrAsk = (order: OpenOrdersAccountWithKey) => {
   const isBidSide = order.account.position.bidsBaseLots.gt(order.account.position.asksBaseLots);
@@ -321,14 +329,10 @@ export const totalUsdcInOrder = (orders: OpenOrdersAccountWithKey[]) => {
   sumOrders = orders.map((order) => {
     if (isBidOrAsk(order)) {
       return (
-        ((
-          order.account.position.bidsBaseLots.toNumber()
-          * order.account.openOrders[0].lockedPrice
-        ) / 10_000) +
-        ((
-          order.account.position.asksBaseLots.toNumber()
-          * order.account.openOrders[0].lockedPrice
-        ) / 10_000)
+        (order.account.position.bidsBaseLots.toNumber() * order.account.openOrders[0].lockedPrice) /
+          10_000 +
+        (order.account.position.asksBaseLots.toNumber() * order.account.openOrders[0].lockedPrice) /
+          10_000
       );
     }
     return 0;
@@ -353,3 +357,51 @@ export const totalMetaInOrder = (orders: OpenOrdersAccountWithKey[]) => {
   const totalValueLocked = sumOrders.reduce((partialSum, amount) => partialSum + amount, 0);
   return numeral(totalValueLocked).format(BASE_FORMAT);
 };
+
+export async function findOpenOrdersForMarket(
+  program: Program<OpenbookV2>,
+  owner: PublicKey,
+  market: PublicKey,
+): Promise<PublicKey[]> {
+  const openOrdersForMarket: PublicKey[] = [];
+  const allOpenOrders = await findAllOpenOrders(program, owner);
+
+  for await (const openOrders of allOpenOrders) {
+    const openOrdersAccount = await deserializeOpenOrderAccount(program, openOrders);
+    if (openOrdersAccount?.market.toString() === market.toString()) {
+      openOrdersForMarket.push(openOrders);
+    }
+  }
+  return openOrdersForMarket;
+}
+
+export async function findAllOpenOrders(
+  program: Program<OpenbookV2>,
+  owner: PublicKey,
+): Promise<PublicKey[]> {
+  const indexer = findOpenOrdersIndexer(owner);
+  const indexerAccount = await deserializeOpenOrdersIndexerAccount(program, indexer);
+  return indexerAccount?.addresses ?? [];
+}
+
+export async function deserializeOpenOrdersIndexerAccount(
+  program: Program<OpenbookV2>,
+  publicKey: PublicKey,
+): Promise<OpenOrdersIndexerAccount | null> {
+  try {
+    return await program.account.openOrdersIndexer.fetch(publicKey);
+  } catch {
+    return null;
+  }
+}
+
+export async function deserializeOpenOrderAccount(
+  program: Program<OpenbookV2>,
+  publicKey: PublicKey,
+): Promise<OpenOrdersAccount | null> {
+  try {
+    return await program.account.openOrdersAccount.fetch(publicKey);
+  } catch {
+    return null;
+  }
+}
